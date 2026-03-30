@@ -18,6 +18,7 @@ const saveProfile = (wallet, data) => localStorage.setItem(`esh_profile_${wallet
 const loadProfile = (wallet) => { try { return JSON.parse(localStorage.getItem(`esh_profile_${wallet.toLowerCase()}`)); } catch { return null; } };
 const saveFile = (key, payload) => localStorage.setItem(`esh_file_${key}`, JSON.stringify(payload));
 const loadFile = (key) => { try { return JSON.parse(localStorage.getItem(`esh_file_${key}`)); } catch { return null; } };
+const loadFileMeta = (key) => { try { const p = JSON.parse(localStorage.getItem(`esh_file_${key}`)); return p?.meta || null; } catch { return null; } };
 const genCID = () => 'Qm' + Array.from(crypto.getRandomValues(new Uint8Array(22))).map(b => b.toString(36)).join('').substring(0, 34);
 const genUniqueID = (role) => {
   const prefix = role === 'patient' ? 'PAT' : 'DOC';
@@ -85,6 +86,7 @@ function App() {
   const [patientReports, setPatientReports] = useState([]);
   const [docReportFile, setDocReportFile] = useState(null);
   const [docReportMeta, setDocReportMeta] = useState({ patientAddr: '', type: 'Blood Test', notes: '' });
+  const [docEmergencyInfo, setDocEmergencyInfo] = useState(null);
 
   // ─── Show Status ────────────────────────────────────────
   const flash = (msg, type = 'info') => setStatus({ msg, type });
@@ -325,10 +327,15 @@ function App() {
 
   const readEmergencyMetadata = async (patientAddress) => {
     try {
-      const [bloodType, emergencyContact] = await recordContract.getEmergencyMetadata(patientAddress);
-      flash(`Emergency metadata — Blood: ${bloodType || 'N/A'}, Contact: ${emergencyContact || 'N/A'}`, 'info');
+      const [bloodType, emergencyContact, updatedAt] = await recordContract.getEmergencyMetadata(patientAddress);
+      setDocEmergencyInfo({
+        bloodType: bloodType || 'N/A',
+        emergencyContact: emergencyContact || 'N/A',
+        updatedAt: updatedAt && Number(updatedAt) > 0 ? new Date(Number(updatedAt) * 1000).toLocaleString() : 'Never'
+      });
     } catch (err) {
       flash(`Unable to load emergency metadata: ${err.reason || err.message}`, 'error');
+      setDocEmergencyInfo(null);
     }
   };
 
@@ -346,7 +353,7 @@ function App() {
       });
       const cid = genCID();
       const encryptedPayload = await encryptForUpload(b64, account, account);
-      saveFile(cid, encryptedPayload);
+      saveFile(cid, { ...encryptedPayload, meta: { doctorName: uploadMeta.doctorName, date: uploadMeta.date, notes: uploadMeta.notes, fileName: uploadFile.name } });
       const tx = await recordContract.addMedicalReport(account, cid, 'Prescription');
       await tx.wait();
       flash(`✅ Prescription uploaded (encrypted)! CID: ${cid.substring(0, 16)}...`, 'success');
@@ -362,6 +369,7 @@ function App() {
     if (!searchPatientAddr) { flash('Enter a patient address.', 'error'); return; }
     try {
       setLoading(true);
+      setDocEmergencyInfo(null);
       const reports = await recordContract.getPatientMedicalReports(searchPatientAddr);
       const parsed = reports.map(r => ({
         id: Number(r.id), ipfsHash: r.ipfsHash, uploadedBy: r.uploadedBy,
@@ -387,7 +395,7 @@ function App() {
           r.readAsDataURL(docReportFile);
         });
         const encryptedPayload = await encryptForUpload(b64, docReportMeta.patientAddr, account);
-        saveFile(cid, encryptedPayload);
+        saveFile(cid, { ...encryptedPayload, meta: { notes: docReportMeta.notes, reportType: docReportMeta.type, fileName: docReportFile.name } });
       }
       const tx = await recordContract.addMedicalReport(docReportMeta.patientAddr, cid, docReportMeta.type);
       await tx.wait();
@@ -405,6 +413,18 @@ function App() {
   // ═══════════════════════════════════════════════════════
   //  RENDER HELPERS
   // ═══════════════════════════════════════════════════════
+
+  const ReportMetaNotes = ({ cid }) => {
+    const m = loadFileMeta(cid);
+    if (!m || (!m.notes && !m.doctorName && !m.date)) return null;
+    return (
+      <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: 6 }}>
+        {m.doctorName && <><strong>Dr:</strong> {m.doctorName} &nbsp;</>}
+        {m.date && <><strong>Date:</strong> {m.date} &nbsp;</>}
+        {m.notes && <><strong>Notes:</strong> {m.notes}</>}
+      </p>
+    );
+  };
 
   const StatusBar = () => status.msg ? (
     <div style={{ maxWidth: 900, margin: '16px auto', padding: '0 24px' }}>
@@ -735,6 +755,7 @@ function App() {
                         </div>
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
                         <p style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 4 }}>By: {r.uploadedBy}</p>
+                        <ReportMetaNotes cid={r.ipfsHash} />
                         <div style={{ marginTop: 10 }}>
                           <button className="btn btn-ghost btn-sm" onClick={() => decryptStoredFile(r.ipfsHash)}>🔓 Decrypt File</button>
                         </div>
@@ -786,12 +807,22 @@ function App() {
                   <p style={{ color: 'var(--text-faint)', textAlign: 'center', padding: 30 }}>No recent activity found.</p>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {activityLogs.map((entry, idx) => (
-                      <div key={`${entry.type}-${entry.timestamp}-${idx}`} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '12px 16px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontWeight: 600 }}>{entry.detail}</div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', marginTop: 4 }}>{new Date(entry.timestamp * 1000).toLocaleString()}</div>
-                      </div>
-                    ))}
+                    {activityLogs.map((entry, idx) => {
+                      const activityStyle = {
+                        grant:  { icon: '✅', color: 'var(--health)' },
+                        revoke: { icon: '🚫', color: 'var(--danger)' },
+                        report: { icon: '📄', color: 'var(--brand-light)' }
+                      }[entry.type] || { icon: '📌', color: 'var(--text-secondary)' };
+                      return (
+                        <div key={`${entry.type}-${entry.timestamp}-${idx}`} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '12px 16px', border: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                          <span style={{ fontSize: '1.2rem', flexShrink: 0, marginTop: 1 }}>{activityStyle.icon}</span>
+                          <div>
+                            <div style={{ fontWeight: 600, color: activityStyle.color }}>{entry.detail}</div>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', marginTop: 4 }}>{new Date(entry.timestamp * 1000).toLocaleString()}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -867,7 +898,7 @@ function App() {
               <div className="glass" style={{ padding: 32 }}>
                 <h3 style={{ fontWeight: 700, marginBottom: 20, color: 'var(--accent-light)' }}>Search Patient Records</h3>
                 <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
-                  <input className="input" placeholder="Enter patient's wallet address (0x...)" value={searchPatientAddr} onChange={e => setSearchPatientAddr(e.target.value)} />
+                  <input className="input" placeholder="Enter patient's wallet address (0x...)" value={searchPatientAddr} onChange={e => { setSearchPatientAddr(e.target.value); setDocEmergencyInfo(null); }} />
                   <button className="btn btn-accent" onClick={fetchPatientReports} disabled={loading} style={{ whiteSpace: 'nowrap' }}>🔍 Search</button>
                 </div>
                 {patientReports.length > 0 && (
@@ -882,6 +913,7 @@ function App() {
                           <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
                         </div>
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
+                        <p style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 4 }}>By: {r.uploadedBy}</p>
                         <div style={{ marginTop: 10 }}>
                           <button className="btn btn-ghost btn-sm" onClick={() => decryptStoredFile(r.ipfsHash)}>🔓 Decrypt File</button>
                         </div>
@@ -899,9 +931,21 @@ function App() {
                     ))}
                   </div>
                 )}
-                <button className="btn btn-ghost btn-sm" style={{ marginTop: 12 }} onClick={() => readEmergencyMetadata(searchPatientAddr)} disabled={!searchPatientAddr || loading}>
-                  🆘 View Emergency Metadata
-                </button>
+                <div style={{ marginTop: 20, display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <button className="btn btn-ghost btn-sm" onClick={() => readEmergencyMetadata(searchPatientAddr)} disabled={!searchPatientAddr || loading}>
+                    🆘 View Emergency Metadata
+                  </button>
+                </div>
+                {docEmergencyInfo && (
+                  <div style={{ marginTop: 16, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 'var(--radius-md)', padding: '16px 20px' }}>
+                    <h4 style={{ fontWeight: 700, color: 'var(--danger)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>🆘 Emergency Information</h4>
+                    <div className="grid-3">
+                      <div><span style={{ fontSize: '0.78rem', color: 'var(--text-faint)', textTransform: 'uppercase', fontWeight: 600 }}>Blood Type</span><p style={{ fontWeight: 700, fontSize: '1.1rem', marginTop: 4, color: 'var(--danger)' }}>{docEmergencyInfo.bloodType}</p></div>
+                      <div><span style={{ fontSize: '0.78rem', color: 'var(--text-faint)', textTransform: 'uppercase', fontWeight: 600 }}>Emergency Contact</span><p style={{ fontWeight: 600, marginTop: 4 }}>{docEmergencyInfo.emergencyContact}</p></div>
+                      <div><span style={{ fontSize: '0.78rem', color: 'var(--text-faint)', textTransform: 'uppercase', fontWeight: 600 }}>Last Updated</span><p style={{ fontWeight: 600, marginTop: 4, fontSize: '0.85rem' }}>{docEmergencyInfo.updatedAt}</p></div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
