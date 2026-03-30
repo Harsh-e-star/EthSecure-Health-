@@ -12,7 +12,7 @@ import { resolve, join } from "node:path";
 
 async function main() {
   // Ensure deployment always uses the latest contract changes
-  await hardhat.run("compile");
+  await hardhat.run("compile", { quiet: true });
 
   // ─── Connect to local Ganache via Hardhat v3 ─────────────────────
   const connection = await hardhat.network.connect();
