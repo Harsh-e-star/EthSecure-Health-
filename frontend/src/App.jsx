@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { ethers } from 'ethers';
+import CryptoJS from 'crypto-js';
+import { encrypt as mmEncrypt } from '@metamask/eth-sig-util';
+import QRCode from 'qrcode';
 import './index.css';
 import deploymentData from './contracts/deployment.json';
 import AccessControlABI from './contracts/EthSecureHealthAccess.json';
@@ -13,8 +16,8 @@ const hashPassword = async (pw) => {
 
 const saveProfile = (wallet, data) => localStorage.setItem(`esh_profile_${wallet.toLowerCase()}`, JSON.stringify(data));
 const loadProfile = (wallet) => { try { return JSON.parse(localStorage.getItem(`esh_profile_${wallet.toLowerCase()}`)); } catch { return null; } };
-const saveFile = (key, base64) => localStorage.setItem(`esh_file_${key}`, base64);
-const loadFile = (key) => localStorage.getItem(`esh_file_${key}`);
+const saveFile = (key, payload) => localStorage.setItem(`esh_file_${key}`, JSON.stringify(payload));
+const loadFile = (key) => { try { return JSON.parse(localStorage.getItem(`esh_file_${key}`)); } catch { return null; } };
 const genCID = () => 'Qm' + Array.from(crypto.getRandomValues(new Uint8Array(22))).map(b => b.toString(36)).join('').substring(0, 34);
 const genUniqueID = (role) => {
   const prefix = role === 'patient' ? 'PAT' : 'DOC';
@@ -23,12 +26,30 @@ const genUniqueID = (role) => {
   return `${prefix}-${rand}`;
 };
 
+const randomHex32 = () => Array.from(crypto.getRandomValues(new Uint8Array(32))).map((b) => b.toString(16).padStart(2, '0')).join('');
+const encodeBase64 = (text) => btoa(unescape(encodeURIComponent(text)));
+const decodeBase64 = (text) => decodeURIComponent(escape(atob(text)));
+
+const walletEncrypt = async (walletAddress, plainText) => {
+  const publicKey = await window.ethereum.request({
+    method: 'eth_getEncryptionPublicKey',
+    params: [walletAddress]
+  });
+  const encrypted = mmEncrypt({
+    publicKey,
+    data: plainText,
+    version: 'x25519-xsalsa20-poly1305'
+  });
+  return {
+    owner: walletAddress.toLowerCase(),
+    value: encodeBase64(JSON.stringify(encrypted))
+  };
+};
+
 function App() {
   // ─── Core State ─────────────────────────────────────────
   const [view, setView] = useState('landing');
   const [account, setAccount] = useState('');
-  const [provider, setProvider] = useState(null);
-  const [signer, setSigner] = useState(null);
   const [accessContract, setAccessContract] = useState(null);
   const [recordContract, setRecordContract] = useState(null);
   const [status, setStatus] = useState({ msg: '', type: '' });
@@ -54,6 +75,10 @@ function App() {
   const [doctorAddr, setDoctorAddr] = useState('');
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadMeta, setUploadMeta] = useState({ doctorName: '', date: '', medication: '', notes: '' });
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [decryptedFiles, setDecryptedFiles] = useState({});
+  const [emergencyMeta, setEmergencyMeta] = useState({ bloodType: '', emergencyContact: '' });
+  const [patientQR, setPatientQR] = useState('');
 
   // ─── Doctor Dashboard State ─────────────────────────────
   const [searchPatientAddr, setSearchPatientAddr] = useState('');
@@ -78,19 +103,13 @@ function App() {
       const access = new ethers.Contract(deploymentData.contracts.EthSecureHealthAccess, AccessControlABI.abi, sig);
       const record = new ethers.Contract(deploymentData.contracts.EthSecureRecord, SecureRecordABI.abi, sig);
 
-      setProvider(prov); setSigner(sig); setAccount(addr);
+      setAccount(addr);
       setAccessContract(access); setRecordContract(record);
 
-      // Check if returning user
       const profile = loadProfile(addr);
-      if (profile) {
-        setView('login');
-        setUserRole(profile.role);
-        flash(`Welcome back! Please login.`, 'info');
-      } else {
-        setView('role-select');
-        flash(`Connected: ${addr.substring(0, 8)}...${addr.substring(38)}`, 'success');
-      }
+      setUserRole(profile?.role || '');
+      setView('auth-choice');
+      flash(`Connected: ${addr.substring(0, 8)}...${addr.substring(38)}. Choose Login or Register.`, 'success');
 
       window.ethereum.on('accountsChanged', (accounts) => {
         if (accounts.length > 0) { window.location.reload(); }
@@ -165,6 +184,10 @@ function App() {
     setMyReports([]);
     setAuthorizedDocs([]);
     setPatientReports([]);
+    setActivityLogs([]);
+    setDecryptedFiles({});
+    setPatientQR('');
+    setEmergencyMeta({ bloodType: '', emergencyContact: '' });
     clearStatus();
   };
 
@@ -219,11 +242,102 @@ function App() {
     } catch { setAuthorizedDocs([]); }
   };
 
+  const encryptForUpload = async (fileBase64, patientAddress, uploaderAddress) => {
+    const dataKey = randomHex32();
+    const encryptedData = CryptoJS.AES.encrypt(fileBase64, dataKey).toString();
+    const keyRecipients = [patientAddress.toLowerCase(), uploaderAddress.toLowerCase()];
+    const encryptedKeys = {};
+    for (const recipient of [...new Set(keyRecipients)]) {
+      const encryptedKey = await walletEncrypt(recipient, dataKey);
+      encryptedKeys[recipient] = encryptedKey.value;
+    }
+    return {
+      encryptedData,
+      encryptedKeys,
+      mime: 'data-url'
+    };
+  };
+
+  const decryptStoredFile = async (cid) => {
+    try {
+      const payload = loadFile(cid);
+      if (!payload) { flash('Encrypted file not found in local storage.', 'error'); return; }
+      if (!payload.encryptedData || !payload.encryptedKeys) { flash('Legacy file format cannot be decrypted.', 'error'); return; }
+      const encryptedKeyForUser = payload.encryptedKeys[account.toLowerCase()];
+      if (!encryptedKeyForUser) { flash('No decryption key available for this wallet.', 'error'); return; }
+      const decryptedKey = await window.ethereum.request({
+        method: 'eth_decrypt',
+        params: [decodeBase64(encryptedKeyForUser), account]
+      });
+      const bytes = CryptoJS.AES.decrypt(payload.encryptedData, decryptedKey);
+      const clearData = bytes.toString(CryptoJS.enc.Utf8);
+      if (!clearData) { flash('Failed to decrypt file payload.', 'error'); return; }
+      setDecryptedFiles((prev) => ({ ...prev, [cid]: clearData }));
+      flash('✅ File decrypted for current session.', 'success');
+    } catch (err) {
+      flash(`Decrypt failed: ${err.message || 'Unknown error'}`, 'error');
+    }
+  };
+
+  const loadActivityLog = async () => {
+    if (!recordContract || !account) return;
+    try {
+      const [grants, revokes, reports] = await Promise.all([
+        recordContract.queryFilter(recordContract.filters.AccessGranted(account)),
+        recordContract.queryFilter(recordContract.filters.AccessRevoked(account)),
+        recordContract.queryFilter(recordContract.filters.ReportAdded(account))
+      ]);
+
+      const timeline = [
+        ...grants.map((e) => ({ type: 'grant', timestamp: Number(e.args.timestamp), detail: `Access granted to ${e.args.doctor}` })),
+        ...revokes.map((e) => ({ type: 'revoke', timestamp: Number(e.args.timestamp), detail: `Access revoked from ${e.args.doctor}` })),
+        ...reports.map((e) => ({ type: 'report', timestamp: Number(e.args.timestamp), detail: `${e.args.reportType} added by ${e.args.uploadedBy}` }))
+      ].sort((a, b) => b.timestamp - a.timestamp);
+
+      setActivityLogs(timeline);
+    } catch {
+      setActivityLogs([]);
+    }
+  };
+
+  const generatePatientQR = async () => {
+    if (!account) return;
+    try {
+      const qrData = await QRCode.toDataURL(account);
+      setPatientQR(qrData);
+    } catch {
+      setPatientQR('');
+    }
+  };
+
+  const saveEmergencyMetadata = async () => {
+    try {
+      setLoading(true);
+      const tx = await recordContract.setEmergencyMetadata(emergencyMeta.bloodType, emergencyMeta.emergencyContact);
+      await tx.wait();
+      flash('✅ Emergency metadata saved on-chain.', 'success');
+    } catch (err) {
+      flash(`Failed to save emergency metadata: ${err.reason || err.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const readEmergencyMetadata = async (patientAddress) => {
+    try {
+      const [bloodType, emergencyContact] = await recordContract.getEmergencyMetadata(patientAddress);
+      flash(`Emergency metadata — Blood: ${bloodType || 'N/A'}, Contact: ${emergencyContact || 'N/A'}`, 'info');
+    } catch (err) {
+      flash(`Unable to load emergency metadata: ${err.reason || err.message}`, 'error');
+    }
+  };
+
   // ─── Patient: Upload Prescription ───────────────────────
   const uploadPrescription = async () => {
     if (!uploadFile) { flash('Select a file first.', 'error'); return; }
     try {
       setLoading(true);
+      if (!window.ethereum) throw new Error('MetaMask is required for encryption');
       const b64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => resolve(e.target.result);
@@ -231,10 +345,11 @@ function App() {
         reader.readAsDataURL(uploadFile);
       });
       const cid = genCID();
-      saveFile(cid, b64);
+      const encryptedPayload = await encryptForUpload(b64, account, account);
+      saveFile(cid, encryptedPayload);
       const tx = await recordContract.addMedicalReport(account, cid, 'Prescription');
       await tx.wait();
-      flash(`✅ Prescription uploaded! CID: ${cid.substring(0, 16)}...`, 'success');
+      flash(`✅ Prescription uploaded (encrypted)! CID: ${cid.substring(0, 16)}...`, 'success');
       setUploadFile(null);
       setUploadMeta({ doctorName: '', date: '', medication: '', notes: '' });
       await fetchMyReports();
@@ -271,7 +386,8 @@ function App() {
           r.onerror = () => reject(new Error('File read failed'));
           r.readAsDataURL(docReportFile);
         });
-        saveFile(cid, b64);
+        const encryptedPayload = await encryptForUpload(b64, docReportMeta.patientAddr, account);
+        saveFile(cid, encryptedPayload);
       }
       const tx = await recordContract.addMedicalReport(docReportMeta.patientAddr, cid, docReportMeta.type);
       await tx.wait();
@@ -366,6 +482,28 @@ function App() {
         )}
 
         {/* ════════ ROLE SELECT ════════ */}
+        {view === 'auth-choice' && (
+          <div className="animate-fade" style={{ maxWidth: 720, margin: '0 auto', padding: '60px 24px', textAlign: 'center' }}>
+            <h2 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: 8 }}>Welcome to EthSecure Health</h2>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: 32 }}>
+              Connected wallet: <span className="mono" style={{ color: 'var(--brand-light)' }}>{shortAddr}</span>
+            </p>
+            <div className="grid-2">
+              <button className="glass" style={{ padding: 28, textAlign: 'left', cursor: 'pointer' }} onClick={() => setView('login')}>
+                <div style={{ fontSize: '2rem', marginBottom: 10 }}>🔑</div>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8 }}>Login to Dashboard</h3>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Use your existing Unique ID and password for this wallet.</p>
+              </button>
+              <button className="glass" style={{ padding: 28, textAlign: 'left', cursor: 'pointer' }} onClick={() => setView('role-select')}>
+                <div style={{ fontSize: '2rem', marginBottom: 10 }}>📝</div>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8 }}>Register New Account</h3>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Create a patient or doctor profile linked to this wallet.</p>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ════════ ROLE SELECT ════════ */}
         {view === 'role-select' && (
           <div className="animate-fade" style={{ maxWidth: 700, margin: '0 auto', padding: '60px 24px', textAlign: 'center' }}>
             <h2 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: 8 }}>Choose Your Role</h2>
@@ -410,6 +548,8 @@ function App() {
               <div style={{ textAlign: 'center', marginTop: 16 }}>
                 <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.85rem' }}
                   onClick={() => setView('role-select')}>Don't have an account? Register</button>
+                <button style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: '0.8rem', marginTop: 8 }}
+                  onClick={() => setView('auth-choice')}>← Back</button>
               </div>
             </div>
           </div>
@@ -455,7 +595,7 @@ function App() {
                 <button className="btn btn-brand btn-lg" onClick={() => handleRegister('patient')} disabled={loading}>
                   {loading ? <><span className="spinner" /> Registering...</> : '📝 Register as Patient'}
                 </button>
-                <button className="btn btn-ghost" onClick={() => setView('role-select')}>Back</button>
+                <button className="btn btn-ghost" onClick={() => setView('auth-choice')}>Back</button>
               </div>
             </div>
           </div>
@@ -495,7 +635,7 @@ function App() {
                 <button className="btn btn-accent btn-lg" onClick={() => handleRegister('doctor')} disabled={loading}>
                   {loading ? <><span className="spinner" /> Registering...</> : '📝 Register as Doctor'}
                 </button>
-                <button className="btn btn-ghost" onClick={() => setView('role-select')}>Back</button>
+                <button className="btn btn-ghost" onClick={() => setView('auth-choice')}>Back</button>
               </div>
             </div>
           </div>
@@ -512,9 +652,19 @@ function App() {
               </div>
             </div>
             <div className="tabs" style={{ marginBottom: 24 }}>
-              {['profile', 'upload', 'records', 'access'].map(t => (
-                <button key={t} className={`tab ${dashTab === t ? 'tab-active' : ''}`} onClick={() => { setDashTab(t); if (t === 'records') fetchMyReports(); if (t === 'access') refreshDoctors(); }}>
-                  {{ profile: '👤 Profile', upload: '📤 Upload Rx', records: '📋 Records', access: '🔐 Access' }[t]}
+              {['profile', 'upload', 'records', 'access', 'activity', 'emergency'].map(t => (
+                <button
+                  key={t}
+                  className={`tab ${dashTab === t ? 'tab-active' : ''}`}
+                  onClick={() => {
+                    setDashTab(t);
+                    if (t === 'records') fetchMyReports();
+                    if (t === 'access') refreshDoctors();
+                    if (t === 'activity') loadActivityLog();
+                    if (t === 'emergency') generatePatientQR();
+                  }}
+                >
+                  {{ profile: '👤 Profile', upload: '📤 Upload Rx', records: '📋 Records', access: '🔐 Access', activity: '🧾 Activity', emergency: '🆘 Emergency' }[t]}
                 </button>
               ))}
             </div>
@@ -585,6 +735,19 @@ function App() {
                         </div>
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
                         <p style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 4 }}>By: {r.uploadedBy}</p>
+                        <div style={{ marginTop: 10 }}>
+                          <button className="btn btn-ghost btn-sm" onClick={() => decryptStoredFile(r.ipfsHash)}>🔓 Decrypt File</button>
+                        </div>
+                        {decryptedFiles[r.ipfsHash] && (
+                          <a
+                            href={decryptedFiles[r.ipfsHash]}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ display: 'inline-block', marginTop: 8, fontSize: '0.82rem', color: 'var(--brand-light)' }}
+                          >
+                            View Decrypted File
+                          </a>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -609,6 +772,54 @@ function App() {
                     <button className="btn btn-danger btn-sm" onClick={() => revokeAccess(doc)}>Revoke</button>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Activity Tab */}
+            {dashTab === 'activity' && (
+              <div className="glass" style={{ padding: 32 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                  <h3 style={{ fontWeight: 700, color: 'var(--brand-light)' }}>Activity Log</h3>
+                  <button className="btn btn-ghost btn-sm" onClick={loadActivityLog} disabled={loading}>🔄 Refresh</button>
+                </div>
+                {activityLogs.length === 0 ? (
+                  <p style={{ color: 'var(--text-faint)', textAlign: 'center', padding: 30 }}>No recent activity found.</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {activityLogs.map((entry, idx) => (
+                      <div key={`${entry.type}-${entry.timestamp}-${idx}`} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '12px 16px', border: '1px solid var(--border)' }}>
+                        <div style={{ fontWeight: 600 }}>{entry.detail}</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', marginTop: 4 }}>{new Date(entry.timestamp * 1000).toLocaleString()}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Emergency Tab */}
+            {dashTab === 'emergency' && (
+              <div className="glass" style={{ padding: 32 }}>
+                <h3 style={{ fontWeight: 700, marginBottom: 20, color: 'var(--brand-light)' }}>Emergency Access Setup</h3>
+                <div className="grid-2">
+                  <div>
+                    <label className="label">Blood Type</label>
+                    <input className="input" value={emergencyMeta.bloodType} onChange={e => setEmergencyMeta({ ...emergencyMeta, bloodType: e.target.value })} placeholder="e.g. O+" />
+                  </div>
+                  <div>
+                    <label className="label">Emergency Contact</label>
+                    <input className="input" value={emergencyMeta.emergencyContact} onChange={e => setEmergencyMeta({ ...emergencyMeta, emergencyContact: e.target.value })} placeholder="Name + phone" />
+                  </div>
+                </div>
+                <button className="btn btn-brand" style={{ marginTop: 16 }} onClick={saveEmergencyMetadata} disabled={loading}>💾 Save On-Chain</button>
+                <div style={{ marginTop: 24 }}>
+                  <h4 style={{ fontWeight: 700, marginBottom: 10 }}>Emergency QR</h4>
+                  {patientQR ? (
+                    <img src={patientQR} alt="Emergency QR" style={{ width: 180, height: 180, borderRadius: 12, border: '1px solid var(--border)', background: '#fff', padding: 8 }} />
+                  ) : (
+                    <p style={{ color: 'var(--text-faint)' }}>QR code unavailable.</p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -671,10 +882,26 @@ function App() {
                           <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
                         </div>
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
+                        <div style={{ marginTop: 10 }}>
+                          <button className="btn btn-ghost btn-sm" onClick={() => decryptStoredFile(r.ipfsHash)}>🔓 Decrypt File</button>
+                        </div>
+                        {decryptedFiles[r.ipfsHash] && (
+                          <a
+                            href={decryptedFiles[r.ipfsHash]}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ display: 'inline-block', marginTop: 8, fontSize: '0.82rem', color: 'var(--accent-light)' }}
+                          >
+                            View Decrypted File
+                          </a>
+                        )}
                       </div>
                     ))}
                   </div>
                 )}
+                <button className="btn btn-ghost btn-sm" style={{ marginTop: 12 }} onClick={() => readEmergencyMetadata(searchPatientAddr)} disabled={!searchPatientAddr || loading}>
+                  🆘 View Emergency Metadata
+                </button>
               </div>
             )}
 
