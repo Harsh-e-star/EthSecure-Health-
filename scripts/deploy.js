@@ -11,6 +11,9 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 
 async function main() {
+  // Ensure deployment always uses the latest contract changes
+  await hardhat.run("compile", { quiet: true });
+
   // ─── Connect to local Ganache via Hardhat v3 ─────────────────────
   const connection = await hardhat.network.connect();
   const accounts = await connection.provider.request({ method: "eth_accounts" });
