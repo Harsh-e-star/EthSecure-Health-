@@ -224,18 +224,20 @@ function App() {
     if (!uploadFile) { flash('Select a file first.', 'error'); return; }
     try {
       setLoading(true);
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const cid = genCID();
-        saveFile(cid, e.target.result);
-        const tx = await recordContract.addMedicalReport(account, cid, 'Prescription');
-        await tx.wait();
-        flash(`✅ Prescription uploaded! CID: ${cid.substring(0, 16)}...`, 'success');
-        setUploadFile(null);
-        setUploadMeta({ doctorName: '', date: '', medication: '', notes: '' });
-        await fetchMyReports();
-      };
-      reader.readAsDataURL(uploadFile);
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = () => reject(new Error('File read failed'));
+        reader.readAsDataURL(uploadFile);
+      });
+      const cid = genCID();
+      saveFile(cid, b64);
+      const tx = await recordContract.addMedicalReport(account, cid, 'Prescription');
+      await tx.wait();
+      flash(`✅ Prescription uploaded! CID: ${cid.substring(0, 16)}...`, 'success');
+      setUploadFile(null);
+      setUploadMeta({ doctorName: '', date: '', medication: '', notes: '' });
+      await fetchMyReports();
     } catch (err) { flash('Upload failed: ' + (err.reason || err.message), 'error'); }
     finally { setLoading(false); }
   };
@@ -263,7 +265,12 @@ function App() {
       setLoading(true);
       let cid = genCID();
       if (docReportFile) {
-        const b64 = await new Promise((res) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.readAsDataURL(docReportFile); });
+        const b64 = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = (e) => resolve(e.target.result);
+          r.onerror = () => reject(new Error('File read failed'));
+          r.readAsDataURL(docReportFile);
+        });
         saveFile(cid, b64);
       }
       const tx = await recordContract.addMedicalReport(docReportMeta.patientAddr, cid, docReportMeta.type);
