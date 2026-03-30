@@ -257,7 +257,7 @@ contract EthSecureRecord {
      * @param _patient The patient's Ethereum wallet address.
      * @return bloodType The patient's blood type.
      * @return emergencyContact The patient's emergency contact details.
-     * @return updatedAt Current block timestamp as retrieval marker.
+     * @return updatedAt Timestamp when emergency metadata was last updated.
      */
     function getEmergencyMetadata(
         address _patient
