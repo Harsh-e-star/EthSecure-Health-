@@ -61,12 +61,16 @@ function App() {
   const [docReportFile, setDocReportFile] = useState(null);
   const [docReportMeta, setDocReportMeta] = useState({ patientAddr: '', type: 'Blood Test', notes: '' });
 
+  // ─── Document Viewer State ───────────────────────────────
+  const [viewingDoc, setViewingDoc] = useState(null);
+
   // ─── Show Status ────────────────────────────────────────
   const flash = (msg, type = 'info') => setStatus({ msg, type });
   const clearStatus = () => setStatus({ msg: '', type: '' });
 
   // ─── MetaMask Connection ────────────────────────────────
-  const connectMetaMask = async () => {
+  // intent: 'register' | 'login' | 'auto'
+  const connectMetaMask = async (intent = 'auto') => {
     if (!window.ethereum) { flash('Please install MetaMask to continue!', 'error'); return; }
     try {
       setLoading(true);
@@ -81,15 +85,36 @@ function App() {
       setProvider(prov); setSigner(sig); setAccount(addr);
       setAccessContract(access); setRecordContract(record);
 
-      // Check if returning user
-      const profile = loadProfile(addr);
-      if (profile) {
-        setView('login');
-        setUserRole(profile.role);
-        flash(`Welcome back! Please login.`, 'info');
+      const existingProfile = loadProfile(addr);
+
+      if (intent === 'login') {
+        if (existingProfile) {
+          setView('login');
+          setUserRole(existingProfile.role);
+          flash('Welcome back! Please enter your credentials.', 'info');
+        } else {
+          flash('No account found for this wallet. Redirecting to registration.', 'warning');
+          setView('role-select');
+        }
+      } else if (intent === 'register') {
+        if (existingProfile) {
+          flash('An account already exists for this wallet. Redirecting to login.', 'info');
+          setView('login');
+          setUserRole(existingProfile.role);
+        } else {
+          setView('role-select');
+          flash(`Wallet connected: ${addr.substring(0, 8)}...${addr.substring(38)}`, 'success');
+        }
       } else {
-        setView('role-select');
-        flash(`Connected: ${addr.substring(0, 8)}...${addr.substring(38)}`, 'success');
+        // auto: preserve original behaviour
+        if (existingProfile) {
+          setView('login');
+          setUserRole(existingProfile.role);
+          flash('Welcome back! Please login.', 'info');
+        } else {
+          setView('role-select');
+          flash(`Connected: ${addr.substring(0, 8)}...${addr.substring(38)}`, 'success');
+        }
       }
 
       window.ethereum.on('accountsChanged', (accounts) => {
@@ -279,6 +304,32 @@ function App() {
   const profile = loadProfile(account);
   const shortAddr = account ? `${account.substring(0, 6)}...${account.substring(38)}` : '';
 
+  // ─── Document Viewer ────────────────────────────────────
+  const reportTypeIcon = (type) => {
+    const icons = { 'Prescription': '💊', 'Blood Test': '🩸', 'MRI Scan': '🧠', 'X-Ray': '🦴',
+      'CT Scan': '🔬', 'Ultrasound': '📡', 'ECG': '💓', 'Consultancy Report': '📝' };
+    return icons[type] || '📄';
+  };
+
+  const openDocument = (ipfsHash, reportType) => {
+    const file = loadFile(ipfsHash);
+    if (!file) { flash('File content not available locally (may be stored on IPFS only).', 'warning'); return; }
+    setViewingDoc({ file, reportType, cid: ipfsHash });
+  };
+
+  const downloadDocument = (ipfsHash, reportType) => {
+    const file = loadFile(ipfsHash);
+    if (!file) { flash('File not available for download.', 'warning'); return; }
+    let ext = 'bin';
+    if (file.startsWith('data:image/png')) ext = 'png';
+    else if (file.startsWith('data:image/jpeg')) ext = 'jpg';
+    else if (file.startsWith('data:application/pdf')) ext = 'pdf';
+    const link = document.createElement('a');
+    link.href = file;
+    link.download = `${reportType.replace(/\s+/g, '_')}_${ipfsHash.substring(0, 8)}.${ext}`;
+    link.click();
+  };
+
   // ═══════════════════════════════════════════════════════
   //  RENDER HELPERS
   // ═══════════════════════════════════════════════════════
@@ -315,6 +366,53 @@ function App() {
     </footer>
   );
 
+  const DocumentModal = () => {
+    if (!viewingDoc) return null;
+    const isImage = viewingDoc.file.startsWith('data:image');
+    const isPDF = viewingDoc.file.startsWith('data:application/pdf');
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
+        onClick={() => setViewingDoc(null)}>
+        <div className="glass-static" style={{ maxWidth: 860, width: '100%', maxHeight: '88vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+          onClick={e => e.stopPropagation()}>
+          {/* Header */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+              <span style={{ fontSize: '1.4rem' }}>{reportTypeIcon(viewingDoc.reportType)}</span>
+              <span className="badge badge-brand">{viewingDoc.reportType}</span>
+              <span style={{ color: 'var(--text-faint)', fontSize: '0.78rem', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+                {viewingDoc.cid}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => downloadDocument(viewingDoc.cid, viewingDoc.reportType)}>⬇️ Download</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setViewingDoc(null)}>✕ Close</button>
+            </div>
+          </div>
+          {/* Body */}
+          <div style={{ flex: 1, overflow: 'auto', padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.3)' }}>
+            {isImage && (
+              <img src={viewingDoc.file} alt={viewingDoc.reportType}
+                style={{ maxWidth: '100%', maxHeight: '65vh', objectFit: 'contain', borderRadius: 'var(--radius-md)' }} />
+            )}
+            {isPDF && (
+              <iframe src={viewingDoc.file} title={viewingDoc.reportType}
+                style={{ width: '100%', height: '65vh', border: 'none', borderRadius: 'var(--radius-md)', background: 'white' }} />
+            )}
+            {!isImage && !isPDF && (
+              <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 40 }}>
+                <div style={{ fontSize: '4rem', marginBottom: 16 }}>📄</div>
+                <p style={{ marginBottom: 8, fontWeight: 600 }}>Preview unavailable for this file type</p>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginBottom: 20 }}>Use the download button to open it in your device.</p>
+                <button className="btn btn-brand" onClick={() => downloadDocument(viewingDoc.cid, viewingDoc.reportType)}>⬇️ Download File</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ═══════════════════════════════════════════════════════
   //  VIEWS
   // ═══════════════════════════════════════════════════════
@@ -324,6 +422,7 @@ function App() {
       <div className="orb orb-1" />
       <div className="orb orb-2" />
       <div className="orb orb-3" />
+      <DocumentModal />
       <Navbar />
       <StatusBar />
 
@@ -339,12 +438,22 @@ function App() {
             <p style={{ fontSize: '1.15rem', color: 'var(--text-secondary)', maxWidth: 600, margin: '0 auto 40px', lineHeight: 1.7 }}>
               Your medical data, encrypted & decentralized. Only you control who sees it. Powered by Ethereum, MetaMask, and IPFS.
             </p>
-            <button className="btn btn-brand btn-lg animate-pulse-glow" onClick={connectMetaMask} disabled={loading}>
-              {loading ? <><span className="spinner" /> Connecting...</> : <>🦊 Connect with MetaMask</>}
-            </button>
-            <div className="grid-3 stagger" style={{ marginTop: 80, textAlign: 'left' }}>
+
+            {/* ── Primary CTA: Register / Login ── */}
+            <div style={{ display: 'flex', gap: 16, justifyContent: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
+              <button className="btn btn-brand btn-lg animate-pulse-glow" onClick={() => connectMetaMask('register')} disabled={loading} style={{ minWidth: 220 }}>
+                {loading ? <><span className="spinner" /> Connecting...</> : <>📝 Register — New User</>}
+              </button>
+              <button className="btn btn-ghost btn-lg" onClick={() => connectMetaMask('login')} disabled={loading}
+                style={{ minWidth: 220, borderColor: 'var(--border-active)', color: 'var(--brand-light)' }}>
+                {loading ? <><span className="spinner" /> Connecting...</> : <>🔑 Login — Returning User</>}
+              </button>
+            </div>
+            <p style={{ color: 'var(--text-faint)', fontSize: '0.82rem', marginBottom: 70 }}>🦊 Requires MetaMask browser extension</p>
+
+            <div className="grid-3 stagger" style={{ textAlign: 'left' }}>
               {[
-                { icon: '🔐', title: 'End-to-End Encrypted', desc: 'AES-256 encryption before IPFS upload. Keys stay with you.' },
+                { icon: '🔐', title: 'End-to-End Encrypted', desc: 'AES-256 encryption before IPFS upload. Your keys never leave your browser.' },
                 { icon: '⛓️', title: 'Blockchain Auditable', desc: 'Every access, grant, and upload is permanently recorded on-chain.' },
                 { icon: '👨‍⚕️', title: 'Doctor Access Control', desc: 'Grant and revoke doctor access to your records with one click.' }
               ].map((f, i) => (
@@ -564,22 +673,38 @@ function App() {
                   <button className="btn btn-ghost btn-sm" onClick={fetchMyReports} disabled={loading}>🔄 Refresh</button>
                 </div>
                 {myReports.length === 0 ? (
-                  <p style={{ color: 'var(--text-faint)', textAlign: 'center', padding: 40 }}>No records found. Reports will appear here when uploaded.</p>
+                  <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-faint)' }}>
+                    <div style={{ fontSize: '3rem', marginBottom: 12 }}>📭</div>
+                    <p style={{ fontWeight: 600, marginBottom: 4 }}>No records found</p>
+                    <p style={{ fontSize: '0.85rem' }}>Reports will appear here once uploaded by you or your doctor.</p>
+                  </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {myReports.map((r, i) => (
-                      <div key={i} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '16px 20px', border: '1px solid var(--border)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span className="badge badge-brand">{r.reportType}</span>
-                            <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>#{r.id}</span>
+                    {myReports.map((r, i) => {
+                      const hasFile = !!loadFile(r.ipfsHash);
+                      return (
+                        <div key={i} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '16px 20px', border: '1px solid var(--border)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: '1.3rem' }}>{reportTypeIcon(r.reportType)}</span>
+                              <span className="badge badge-brand">{r.reportType}</span>
+                              <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>#{r.id}</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
+                              {hasFile && (
+                                <>
+                                  <button className="btn btn-ghost btn-sm" onClick={() => openDocument(r.ipfsHash, r.reportType)} style={{ gap: 4 }}>👁️ View</button>
+                                  <button className="btn btn-ghost btn-sm" onClick={() => downloadDocument(r.ipfsHash, r.reportType)} style={{ gap: 4 }}>⬇️</button>
+                                </>
+                              )}
+                            </div>
                           </div>
-                          <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
+                          <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 8, fontFamily: 'monospace' }} className="truncate">CID: {r.ipfsHash}</p>
+                          <p style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 4 }}>Uploaded by: {r.uploadedBy.substring(0, 10)}...{r.uploadedBy.substring(38)}</p>
                         </div>
-                        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
-                        <p style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 4 }}>By: {r.uploadedBy}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -652,20 +777,41 @@ function App() {
                   <input className="input" placeholder="Enter patient's wallet address (0x...)" value={searchPatientAddr} onChange={e => setSearchPatientAddr(e.target.value)} />
                   <button className="btn btn-accent" onClick={fetchPatientReports} disabled={loading} style={{ whiteSpace: 'nowrap' }}>🔍 Search</button>
                 </div>
+                {patientReports.length === 0 && searchPatientAddr && (
+                  <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-faint)' }}>
+                    <div style={{ fontSize: '2.5rem', marginBottom: 10 }}>📭</div>
+                    <p>No records found for this patient, or access has not been granted.</p>
+                  </div>
+                )}
                 {patientReports.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {patientReports.map((r, i) => (
-                      <div key={i} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '16px 20px', border: '1px solid var(--border)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span className="badge badge-accent">{r.reportType}</span>
-                            <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>#{r.id}</span>
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-faint)', marginBottom: 4 }}>
+                      {patientReports.length} record{patientReports.length !== 1 ? 's' : ''} found
+                    </p>
+                    {patientReports.map((r, i) => {
+                      const hasFile = !!loadFile(r.ipfsHash);
+                      return (
+                        <div key={i} style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius-md)', padding: '16px 20px', border: '1px solid var(--border)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: '1.3rem' }}>{reportTypeIcon(r.reportType)}</span>
+                              <span className="badge badge-accent">{r.reportType}</span>
+                              <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>#{r.id}</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
+                              {hasFile && (
+                                <>
+                                  <button className="btn btn-ghost btn-sm" onClick={() => openDocument(r.ipfsHash, r.reportType)}>👁️ View</button>
+                                  <button className="btn btn-ghost btn-sm" onClick={() => downloadDocument(r.ipfsHash, r.reportType)}>⬇️</button>
+                                </>
+                              )}
+                            </div>
                           </div>
-                          <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{r.timestamp}</span>
+                          <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 8, fontFamily: 'monospace' }} className="truncate">CID: {r.ipfsHash}</p>
                         </div>
-                        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 8 }} className="mono truncate">CID: {r.ipfsHash}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
