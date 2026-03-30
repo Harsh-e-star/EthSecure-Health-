@@ -115,7 +115,7 @@ describe("EthSecure Health - Smart Contract Test Suite", function () {
     it("Should prevent unauthorized doctor from viewing reports", async function () {
       await expect(
         secureRecord.connect(doctor2).getPatientMedicalReports(patient.address)
-      ).to.be.revertedWith("Not authorized to view records");
+      ).to.be.revertedWith("Doctor does not have access");
     });
 
     it("Should allow patient to view their own reports", async function () {
@@ -124,6 +124,22 @@ describe("EthSecure Health - Smart Contract Test Suite", function () {
       );
       const reports = await secureRecord.connect(patient).getPatientMedicalReports(patient.address);
       expect(reports.length).to.equal(1);
+    });
+
+    it("Should allow patient to upload their own prescription", async function () {
+      await secureRecord.connect(patient).addMedicalReport(
+        patient.address, "QmSelfUploadedPrescription", "Prescription"
+      );
+      const reports = await secureRecord.connect(patient).getPatientMedicalReports(patient.address);
+      expect(reports.length).to.equal(1);
+      expect(reports[0].uploadedBy).to.equal(patient.address);
+      expect(reports[0].reportType).to.equal("Prescription");
+    });
+
+    it("Should block non-doctor non-patient account from viewing records", async function () {
+      await expect(
+        secureRecord.connect(unauthorized).getPatientMedicalReports(patient.address)
+      ).to.be.revertedWith("Only patient or doctor can view records");
     });
   });
 
@@ -148,7 +164,7 @@ describe("EthSecure Health - Smart Contract Test Suite", function () {
       // Doctor CANNOT view after revocation
       await expect(
         secureRecord.connect(doctor).getPatientMedicalReports(patient.address)
-      ).to.be.revertedWith("Not authorized to view records");
+      ).to.be.revertedWith("Doctor does not have access");
     });
 
     it("Should block doctor from adding reports after access is revoked", async function () {
@@ -156,6 +172,29 @@ describe("EthSecure Health - Smart Contract Test Suite", function () {
       await expect(
         secureRecord.connect(doctor).addMedicalReport(patient.address, "QmNewReport", "X-Ray")
       ).to.be.revertedWith("Not authorized to add report for this patient");
+    });
+  });
+
+  // ─── Emergency Metadata ────────────────────────────────────────
+  describe("Emergency Metadata", function () {
+    beforeEach(async function () {
+      await secureRecord.connect(patient).registerPatient("QmPatientDemo123");
+    });
+
+    it("Should allow patient to set emergency metadata", async function () {
+      const tx = await secureRecord.connect(patient).setEmergencyMetadata("O+", "Jane Doe: +91-9999999999");
+      await tx.wait();
+      const [bloodType, emergencyContact, updatedAt] = await secureRecord.getEmergencyMetadata(patient.address);
+      expect(bloodType).to.equal("O+");
+      expect(emergencyContact).to.equal("Jane Doe: +91-9999999999");
+      expect(updatedAt).to.be.gt(0n);
+    });
+
+    it("Should allow any caller to read emergency metadata for registered patient", async function () {
+      await secureRecord.connect(patient).setEmergencyMetadata("AB-", "John Emergency: +91-8888888888");
+      const [bloodType, emergencyContact] = await secureRecord.connect(doctor2).getEmergencyMetadata(patient.address);
+      expect(bloodType).to.equal("AB-");
+      expect(emergencyContact).to.equal("John Emergency: +91-8888888888");
     });
   });
 });

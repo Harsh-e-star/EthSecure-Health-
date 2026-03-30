@@ -29,6 +29,9 @@ contract EthSecureRecord {
     /// @notice Stores patient demographic metadata pointer
     struct Patient {
         string  ipfsHash;       // CID of encrypted demographic data on IPFS
+        string  bloodType;      // Emergency blood type metadata
+        string  emergencyContact; // Emergency contact metadata
+        uint256 emergencyMetadataUpdatedAt; // Last emergency metadata update
         bool    isRegistered;   // Registration flag
     }
 
@@ -59,6 +62,7 @@ contract EthSecureRecord {
 
     /// @notice Emitted when a patient successfully registers on the platform
     event PatientRegistered(address indexed patient, string ipfsHash, uint256 timestamp);
+    event EmergencyMetadataUpdated(address indexed patient, string bloodType, string emergencyContact, uint256 timestamp);
 
     /// @notice Emitted when a patient grants a doctor access to their records
     event AccessGranted(address indexed patient, address indexed doctor, uint256 timestamp);
@@ -109,6 +113,9 @@ contract EthSecureRecord {
 
         patients[msg.sender] = Patient({
             ipfsHash: _ipfsHash,
+            bloodType: "",
+            emergencyContact: "",
+            emergencyMetadataUpdatedAt: 0,
             isRegistered: true
         });
 
@@ -182,6 +189,7 @@ contract EthSecureRecord {
         string memory _ipfsHash,
         string memory _reportType
     ) public onlyRegisteredPatient(_patient) {
+        bool isPatientUploader = msg.sender == _patient;
         bool isDiagnostic = accessControl.hasRole(
             accessControl.DIAGNOSTIC_CENTER_ROLE(), msg.sender
         );
@@ -190,7 +198,7 @@ contract EthSecureRecord {
         ) && doctorAccess[_patient][msg.sender];
 
         require(
-            isDiagnostic || isAuthorizedDoctor,
+            isPatientUploader || isDiagnostic || isAuthorizedDoctor,
             "Not authorized to add report for this patient"
         );
 
@@ -218,13 +226,49 @@ contract EthSecureRecord {
         address _patient
     ) public view onlyRegisteredPatient(_patient) returns (MedicalReport[] memory) {
         bool isPatient = msg.sender == _patient;
-        bool isAuthorizedDoctor = accessControl.hasRole(
-            accessControl.DOCTOR_ROLE(), msg.sender
-        ) && doctorAccess[_patient][msg.sender];
-
-        require(isPatient || isAuthorizedDoctor, "Not authorized to view records");
+        if (!isPatient) {
+            require(
+                accessControl.hasRole(accessControl.DOCTOR_ROLE(), msg.sender),
+                "Only patient or doctor can view records"
+            );
+            require(doctorAccess[_patient][msg.sender], "Doctor does not have access");
+        }
 
         return patientReports[_patient];
+    }
+
+    /**
+     * @notice Sets emergency metadata for the caller patient.
+     * @param _bloodType Blood type string for emergency triage.
+     * @param _emergencyContact Emergency contact details.
+     */
+    function setEmergencyMetadata(
+        string memory _bloodType,
+        string memory _emergencyContact
+    ) public onlyRegisteredPatient(msg.sender) {
+        patients[msg.sender].bloodType = _bloodType;
+        patients[msg.sender].emergencyContact = _emergencyContact;
+        patients[msg.sender].emergencyMetadataUpdatedAt = block.timestamp;
+        emit EmergencyMetadataUpdated(msg.sender, _bloodType, _emergencyContact, block.timestamp);
+    }
+
+    /**
+     * @notice Returns emergency metadata for any registered patient.
+     * @param _patient The patient's Ethereum wallet address.
+     * @return bloodType The patient's blood type.
+     * @return emergencyContact The patient's emergency contact details.
+     * @return updatedAt Current block timestamp as retrieval marker.
+     */
+    function getEmergencyMetadata(
+        address _patient
+    )
+        public
+        view
+        onlyRegisteredPatient(_patient)
+        returns (string memory bloodType, string memory emergencyContact, uint256 updatedAt)
+    {
+        Patient storage p = patients[_patient];
+        return (p.bloodType, p.emergencyContact, p.emergencyMetadataUpdatedAt);
     }
 
     /**

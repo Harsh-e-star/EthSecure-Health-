@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { ethers } from 'ethers';
+import CryptoJS from 'crypto-js';
+import { encrypt as mmEncrypt } from '@metamask/eth-sig-util';
+import QRCode from 'qrcode';
 import './index.css';
 import deploymentData from './contracts/deployment.json';
 import AccessControlABI from './contracts/EthSecureHealthAccess.json';
@@ -13,14 +16,32 @@ const hashPassword = async (pw) => {
 
 const saveProfile = (wallet, data) => localStorage.setItem(`esh_profile_${wallet.toLowerCase()}`, JSON.stringify(data));
 const loadProfile = (wallet) => { try { return JSON.parse(localStorage.getItem(`esh_profile_${wallet.toLowerCase()}`)); } catch { return null; } };
-const saveFile = (key, base64) => localStorage.setItem(`esh_file_${key}`, base64);
-const loadFile = (key) => localStorage.getItem(`esh_file_${key}`);
+const saveFile = (key, payload) => localStorage.setItem(`esh_file_${key}`, JSON.stringify(payload));
+const loadFile = (key) => { try { return JSON.parse(localStorage.getItem(`esh_file_${key}`)); } catch { return null; } };
 const genCID = () => 'Qm' + Array.from(crypto.getRandomValues(new Uint8Array(22))).map(b => b.toString(36)).join('').substring(0, 34);
 const genUniqueID = (role) => {
   const prefix = role === 'patient' ? 'PAT' : 'DOC';
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const rand = Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => chars[b % chars.length]).join('');
   return `${prefix}-${rand}`;
+};
+
+const randomHex32 = () => Array.from(crypto.getRandomValues(new Uint8Array(32))).map((b) => b.toString(16).padStart(2, '0')).join('');
+
+const walletEncrypt = async (walletAddress, plainText) => {
+  const publicKey = await window.ethereum.request({
+    method: 'eth_getEncryptionPublicKey',
+    params: [walletAddress]
+  });
+  const encrypted = mmEncrypt({
+    publicKey,
+    data: plainText,
+    version: 'x25519-xsalsa20-poly1305'
+  });
+  return {
+    owner: walletAddress.toLowerCase(),
+    value: Buffer.from(JSON.stringify(encrypted), 'utf8').toString('base64')
+  };
 };
 
 function App() {
