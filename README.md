@@ -213,6 +213,7 @@ EthSecureHealth/
 │   ├── tailwind.config.js           # Custom theme configuration
 │   └── postcss.config.js            # PostCSS pipeline
 ├── docs/
+│   ├── Cluely_Quick_Start_Guide.md  # Setup guide for Cluely desktop assistant
 │   ├── Faculty_Presentation.md      # Detailed faculty explanation guide
 │   ├── Project_Recreation_Guide.md  # Step-by-step recreation instructions
 │   └── Project_Report.md            # Comprehensive project report
